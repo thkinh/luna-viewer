@@ -32,7 +32,7 @@ class ScreenCanvas : public QWidget {
         if (!enabled)
             release();
         enabled_ = enabled;
-        setCursor(enabled ? Qt::CrossCursor : Qt::ArrowCursor);
+        setCursor(Qt::ArrowCursor);
     }
     void set_frame(FrameSnapshot frame) {
         if (frame_ && (frame_->geometry.width != frame->geometry.width ||
