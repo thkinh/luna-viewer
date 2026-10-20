@@ -276,7 +276,7 @@ int main(int argc, char **argv) {
         present.start(16);
         thread.start();
         if (config.registration.empty())
-            window.set_status("Supply --profile and --dictionary before connecting; see README.md");
+            window.set_status("Supply --profile before connecting; see README.md");
         window.show();
         if (smoke_ms)
             QTimer::singleShot(smoke_ms, &app, &QCoreApplication::quit);

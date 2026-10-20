@@ -46,12 +46,12 @@ The tests use local fixtures and do not connect to UltraViewer services.
    python3 tools/create_identity_profile.py --interface enp3s0 --local-ip 192.168.1.20
    ```
 
-2. Provide a local copy of UltraViewer's screen dictionary, `8bit.dat`. LunaViewer needs this Zstandard dictionary to decode screen updates. The file is not included here; the MacViewer repository excludes it from its MIT license. Use a copy you are authorized to use.
+2. LunaViewer includes `8bit.dat`, the Zstandard dictionary required to decode screen updates. Its provenance and checksum are recorded in [8BIT-DATA-NOTICE.txt](8BIT-DATA-NOTICE.txt).
 
-3. Start LunaViewer, replacing the dictionary path with its location on your system:
+3. Start LunaViewer from the LunaViewer source directory. The generated profile already points to the bundled dictionary:
 
    ```sh
-   ./build/lunaviewer --profile identity-profile.json --dictionary /path/to/8bit.dat
+   ./build/lunaviewer --profile identity-profile.json
    ```
 
 4. Enter the Windows computer's UltraViewer ID and password. Connect, then enable **Enable remote control** when the host permits control. The Windows peer's password is entered in the app; it is not stored in the local identity profile.
@@ -66,6 +66,6 @@ The app shows the log path in its status bar. By default it is `${XDG_STATE_HOME
 
 LunaViewer currently implements the Linux viewer/controller side for Windows peers. Linux hosting, file transfer, clipboard, chat, audio, LAN upgrades, and older screen/input variants are not implemented.
 
-Protocol behavior is based on the MacViewer source snapshot and local reverse-engineering notes. See [MACVIEWER-LICENSE.txt](MACVIEWER-LICENSE.txt) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for attribution and dependency notices. The `8bit.dat` data file is not redistributed by LunaViewer.
+Protocol behavior is based on the MacViewer source snapshot and local reverse-engineering notes. See [MACVIEWER-LICENSE.txt](MACVIEWER-LICENSE.txt), [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), and [8BIT-DATA-NOTICE.txt](8BIT-DATA-NOTICE.txt) for attribution and asset notices.
 
 Cám ơn anh Tâm Nguyễn đã share bài trên J2TEAM Community

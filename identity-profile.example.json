@@ -34,5 +34,5 @@
   "command_hostname": "functions3.ultraviewer.net",
   "command_port": 443,
   "sni": "ultraviewer",
-  "dictionary_path": ""
+  "dictionary_path": "./8bit.dat"
 }

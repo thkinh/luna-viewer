@@ -25,4 +25,4 @@ SOFTWARE.
 This license covers the original MacViewer source code only. Third-party
 components under ThirdParty/ are distributed under their own licenses (see
 THIRD_PARTY_NOTICES.md). The 8bit.dat dictionary is an UltraViewer-supplied
-data asset and is not licensed under the MIT License.
+data asset and is not licensed under the MIT License; see 8BIT-DATA-NOTICE.txt.

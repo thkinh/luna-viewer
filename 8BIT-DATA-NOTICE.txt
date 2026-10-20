@@ -1,0 +1,13 @@
+UltraViewer screen dictionary (`8bit.dat`)
+
+This file is required to decode UltraViewer screen updates with Zstandard.
+It was copied from an installed UltraViewer for Windows distribution found in
+the local Wine installation's UltraViewer program directory. It is 112,640
+bytes and has SHA-256:
+
+    9aa45789d9ff9d329a623a685d57b67e33c777019de9ce1f273f21860e4bfe6b
+
+This data asset is not covered by the MacViewer MIT license. UltraViewer and
+this asset remain subject to their respective rights holder's terms. The
+source-code licenses in this repository do not grant additional rights to
+redistribute this asset.

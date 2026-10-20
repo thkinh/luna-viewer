@@ -1,4 +1,4 @@
-Protocol and renderer logic is ported from MacViewer, commit 237c446b3408c9e7d41d7a7493534274fe0563e7. Its MIT notice is retained in MACVIEWER-LICENSE.txt. The UltraViewer 8bit.dat dictionary is excluded from that license and is not distributed here; supply an existing local asset explicitly.
+Protocol and renderer logic is ported from MacViewer, commit 237c446b3408c9e7d41d7a7493534274fe0563e7. Its MIT notice is retained in MACVIEWER-LICENSE.txt. The bundled UltraViewer `8bit.dat` dictionary is not covered by MacViewer's MIT license; see [8BIT-DATA-NOTICE.txt](8BIT-DATA-NOTICE.txt) for its source and checksum.
 
 This application links the system Qt6, OpenSSL, Zstandard and libjpeg-turbo libraries. They retain their respective licenses. Consult distribution packaging notices when redistributing their binaries; this repository does not vendor them.
 
