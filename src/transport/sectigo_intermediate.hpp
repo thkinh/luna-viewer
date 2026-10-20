@@ -4,7 +4,8 @@
 // SHA256 DER: 8c54c334b66ba4e426772af4a3f9136c19a1aec729fdb28c535c07a5a4ef22e0
 // Verified against this machine's system roots on 2026-10-20. This is an
 // intermediate, not a root; partial-chain trust remains disabled.
-namespace lunaviewer { namespace detail {
+namespace lunaviewer {
+namespace detail {
 constexpr char sectigo_r36_pem[] = R"CERT(-----BEGIN CERTIFICATE-----
 MIIGTDCCBDSgAwIBAgIQOXpmzCdWNi4NqofKbqvjsTANBgkqhkiG9w0BAQwFADBf
 MQswCQYDVQQGEwJHQjEYMBYGA1UEChMPU2VjdGlnbyBMaW1pdGVkMTYwNAYDVQQD
@@ -42,4 +43,5 @@ r8IWKIMxzxLPv5Kt3ePKcUdvkBU/smqujSczTzzSjIoR5QqQA6lN1ZRSnuHIWCvh
 JEltkYnTAH41QJ6SAWO66GrrUESwN/cgZzL4JLEqz1Y=
 -----END CERTIFICATE-----
 )CERT";
-} }
+}
+} // namespace lunaviewer

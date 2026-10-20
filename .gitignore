@@ -3,3 +3,4 @@ CMakeUserPresets.json
 *.user
 identity-profile.json
 agent-progress/
+compile_commands.json

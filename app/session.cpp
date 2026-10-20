@@ -5,228 +5,388 @@
 #include <sstream>
 #include <stdexcept>
 namespace lunaviewer {
-    namespace {
-        bool same_route(const protocol::Route& a,const protocol::Route& b) {
-            return a.address==b.address && a.port==b.port;
-        }
+namespace {
+bool same_route(const protocol::Route &a, const protocol::Route &b) {
+    return a.address == b.address && a.port == b.port;
+}
+} // namespace
+Session::Session(SessionConfig config, SessionCallbacks callbacks)
+    : config_(std::move(config)), callbacks_(std::move(callbacks)) {
+}
+bool Session::active() const {
+    return phase_ == Phase::Active;
+}
+void Session::status(const std::string &message) {
+    if (callbacks_.status)
+        callbacks_.status(message);
+}
+void Session::permission_diagnostic(const std::string &source) {
+    if (callbacks_.diagnostic)
+        callbacks_.diagnostic("permission source=" + source +
+                              "; active=" + (active() ? "yes" : "no") + "; remote=" +
+                              (!active() && !permission_reported_ ? "unavailable"
+                               : allowed_                         ? "available"
+                                                                  : "denied") +
+                              "; local_control=" + (enabled_ ? "enabled" : "disabled"));
+}
+void Session::start(Credentials credentials, std::int64_t now_ms) {
+    if (phase_ != Phase::Idle)
+        disconnect();
+    now_ = now_ms;
+    try {
+        protocol::registration_text(config_.registration);
+        if (credentials.target_id.empty() || credentials.password.empty())
+            throw std::runtime_error("Partner ID and password are required");
+        if (!std::all_of(credentials.target_id.begin(), credentials.target_id.end(),
+                         [](unsigned char c) { return c >= '0' && c <= '9'; }))
+            throw std::runtime_error("Partner ID must contain only digits");
+        blocked_keyboard_ = 0;
+        gated_input_ = 0;
+        forwarded_input_ = 0;
+        credentials_ = std::move(credentials);
+        correlation_ = std::stoi(protocol::random_digits(8));
+        connection_hash_ = protocol::random_token(16);
+        renderer_ = std::make_unique<ScreenRenderer>();
+        if (config_.require_dictionary && config_.dictionary_path.empty())
+            throw std::runtime_error(
+                "Provide the existing local screen dictionary with --dictionary");
+        renderer_->load_dictionary(config_.dictionary_path);
+        phase_ = Phase::Registering;
+        deadline_ = now_ + 20000;
+        heartbeat_at_ = 0;
+        heartbeat_count_ = 0;
+        allowed_ = false;
+        enabled_ = false;
+        permission_reported_ = false;
+        if (callbacks_.permission)
+            callbacks_.permission(false);
+        permission_diagnostic("connection-start");
+        status("Registering local identity");
+        callbacks_.open(Channel::Command, config_.command);
+    } catch (const std::exception &e) {
+        fail(e.what());
     }
-    Session::Session(SessionConfig config,SessionCallbacks callbacks)
-        :config_(std::move(config)),callbacks_(std::move(callbacks)) {}
-    bool Session::active() const { return phase_==Phase::Active; }
-    void Session::status(const std::string& message) { if(callbacks_.status) callbacks_.status(message); }
-    void Session::permission_diagnostic(const std::string& source) {
-        if(callbacks_.diagnostic) callbacks_.diagnostic("permission source="+source+
-                "; active="+(active()?"yes":"no")+"; remote="+
-                (!active()&&!permission_reported_?"unavailable":allowed_?"available":"denied")+
-                "; local_control="+(enabled_?"enabled":"disabled"));
+}
+void Session::ready(Channel channel) {
+    try {
+        if (channel == Channel::Command && phase_ == Phase::Registering)
+            callbacks_.send(channel, protocol::command_envelope(
+                                         protocol::registration_text(config_.registration)));
+        else if (channel == Channel::Peer && phase_ == Phase::ConnectingPeer)
+            login();
+    } catch (const std::exception &e) {
+        fail(e.what());
     }
-    void Session::start(Credentials credentials,std::int64_t now_ms) {
-        if(phase_!=Phase::Idle)disconnect(); now_=now_ms;
+}
+void Session::receive(Channel channel, const Bytes &body) {
+    if (phase_ == Phase::Closed || phase_ == Phase::Idle)
+        return;
+    try {
+        if (channel == Channel::Command)
+            command_frame(body);
+        else
+            peer_frame(body);
+    } catch (const std::exception &e) {
+        fail(e.what());
+    }
+}
+void Session::command_frame(const Bytes &body) {
+    auto envelope = protocol::parse_envelope(body);
+    if (!envelope.system)
+        return;
+    const auto reply = protocol::text(envelope.payload);
+    if (phase_ == Phase::Registering && reply.rfind("3:", 0) == 0) {
+        registration_ = protocol::parse_registration(envelope.payload);
+        protocol::LookupRequest request;
+        request.target_id = credentials_.target_id;
+        request.password = credentials_.password;
+        request.version = config_.registration[7];
+        request.license1 = config_.registration[25];
+        request.license2 = config_.registration[26];
+        request.local_id = registration_.assigned_id;
+        request.local_password = config_.registration[2];
+        request.correlation = correlation_;
+        request.referral = config_.registration[20];
+        request.utc_offset = config_.utc_offset_minutes;
+        phase_ = Phase::Lookup;
+        deadline_ = now_ + 20000;
+        status("Looking up partner");
+        callbacks_.send(Channel::Command,
+                        protocol::command_envelope(protocol::lookup_text(request)));
+    } else if (phase_ == Phase::Lookup && reply.rfind("8:", 0) == 0) {
+        auto result = protocol::parse_lookup(envelope.payload);
+        if (result.correlation != correlation_)
+            return;
+        if (result.status == 2)
+            throw std::runtime_error("Partner password was rejected");
+        if (result.status != 1)
+            throw std::runtime_error("Partner lookup failed: status " +
+                                     std::to_string(result.status));
+        lookup_ = std::move(result);
+        TlsConfig peer = config_.command;
+        peer.connect_address = lookup_.relay_ip;
+        peer.verify_name =
+            lookup_.relay_hostname.empty() ? config_.command.verify_name : lookup_.relay_hostname;
+        peer.http_host = peer.verify_name;
+        phase_ = Phase::ConnectingPeer;
+        deadline_ = now_ + 20000;
+        status("Connecting to partner relay");
+        callbacks_.open(Channel::Peer, peer);
+    }
+}
+void Session::send_peer(const Bytes &payload) {
+    callbacks_.send(Channel::Peer, protocol::forward(lookup_.route, payload));
+}
+void Session::login(int mode, bool clear) {
+    protocol::LoginRequest request;
+    request.password = credentials_.password;
+    request.nonce = protocol::random_digits(8);
+    request.local_id = registration_.assigned_id;
+    request.display_name = config_.display_name;
+    request.connection_hash = connection_hash_;
+    request.secret_token = lookup_.secret_token;
+    request.version = config_.registration[7];
+    request.width = config_.local_width;
+    request.height = config_.local_height;
+    request.control_mode = mode;
+    request.clear_control_mode = clear;
+    phase_ = Phase::Login;
+    deadline_ = now_ + 20000;
+    status("Waiting for partner initialization");
+    send_peer(protocol::bytes(protocol::login_text(request)));
+}
+void Session::peer_frame(const Bytes &body) {
+    auto envelope = protocol::parse_envelope(body);
+    if (envelope.system)
+        return;
+    // Only the bounded hash-bound command26 can migrate an established route.
+    Parts parts;
+    if (!same_route(envelope.route, lookup_.route)) {
         try {
-            protocol::registration_text(config_.registration);
-            if(credentials.target_id.empty() || credentials.password.empty())
-                throw std::runtime_error("Partner ID and password are required");
-            if(!std::all_of(credentials.target_id.begin(),credentials.target_id.end(),
-                        [](unsigned char c){return c>='0'&&c<='9';}))
-                throw std::runtime_error("Partner ID must contain only digits");
-            blocked_keyboard_=0;gated_input_=0;forwarded_input_=0;
-            credentials_=std::move(credentials);
-            correlation_=std::stoi(protocol::random_digits(8));
-            connection_hash_=protocol::random_token(16);
-            renderer_=std::make_unique<ScreenRenderer>();
-            if(config_.require_dictionary && config_.dictionary_path.empty())
-                throw std::runtime_error("Provide the existing local screen dictionary with --dictionary");
-            renderer_->load_dictionary(config_.dictionary_path);
-            phase_=Phase::Registering; deadline_=now_+20000;
-            heartbeat_at_=0; heartbeat_count_=0; allowed_=false; enabled_=false; permission_reported_=false;
-            if(callbacks_.permission) callbacks_.permission(false);
-            permission_diagnostic("connection-start");
-            status("Registering local identity"); callbacks_.open(Channel::Command,config_.command);
-        } catch(const std::exception& e) { fail(e.what()); }
-    }
-    void Session::ready(Channel channel) {
-        try {
-            if(channel==Channel::Command && phase_==Phase::Registering)
-                callbacks_.send(channel,protocol::command_envelope(protocol::registration_text(config_.registration)));
-            else if(channel==Channel::Peer && phase_==Phase::ConnectingPeer) login();
-        } catch(const std::exception& e) { fail(e.what()); }
-    }
-    void Session::receive(Channel channel,const Bytes& body) {
-        if(phase_==Phase::Closed || phase_==Phase::Idle) return;
-        try { if(channel==Channel::Command) command_frame(body); else peer_frame(body); }
-        catch(const std::exception& e) { fail(e.what()); }
-    }
-    void Session::command_frame(const Bytes& body) {
-        auto envelope=protocol::parse_envelope(body);
-        if(!envelope.system) return;
-        const auto reply=protocol::text(envelope.payload);
-        if(phase_==Phase::Registering && reply.rfind("3:",0)==0) {
-            registration_=protocol::parse_registration(envelope.payload);
-            protocol::LookupRequest request;
-            request.target_id=credentials_.target_id; request.password=credentials_.password;
-            request.version=config_.registration[7]; request.license1=config_.registration[25];
-            request.license2=config_.registration[26]; request.local_id=registration_.assigned_id;
-            request.local_password=config_.registration[2]; request.correlation=correlation_;
-            request.referral=config_.registration[20]; request.utc_offset=config_.utc_offset_minutes;
-            phase_=Phase::Lookup; deadline_=now_+20000;
-            status("Looking up partner");
-            callbacks_.send(Channel::Command,protocol::command_envelope(protocol::lookup_text(request)));
-        } else if(phase_==Phase::Lookup && reply.rfind("8:",0)==0) {
-            auto result=protocol::parse_lookup(envelope.payload);
-            if(result.correlation!=correlation_) return;
-            if(result.status==2) throw std::runtime_error("Partner password was rejected");
-            if(result.status!=1) throw std::runtime_error("Partner lookup failed: status "+std::to_string(result.status));
-            lookup_=std::move(result);
-            TlsConfig peer=config_.command;
-            peer.connect_address=lookup_.relay_ip;
-            peer.verify_name=lookup_.relay_hostname.empty()?config_.command.verify_name:lookup_.relay_hostname;
-            peer.http_host=peer.verify_name;
-            phase_=Phase::ConnectingPeer; deadline_=now_+20000;
-            status("Connecting to partner relay"); callbacks_.open(Channel::Peer,peer);
+            parts = protocol::parse_multipart(envelope.payload);
+        } catch (const std::exception &) {
+            return;
         }
-    }
-    void Session::send_peer(const Bytes& payload) {
-        callbacks_.send(Channel::Peer,protocol::forward(lookup_.route,payload));
-    }
-    void Session::login(int mode,bool clear) {
-        protocol::LoginRequest request;
-        request.password=credentials_.password; request.nonce=protocol::random_digits(8);
-        request.local_id=registration_.assigned_id; request.display_name=config_.display_name;
-        request.connection_hash=connection_hash_; request.secret_token=lookup_.secret_token;
-        request.version=config_.registration[7]; request.width=config_.local_width;
-        request.height=config_.local_height; request.control_mode=mode; request.clear_control_mode=clear;
-        phase_=Phase::Login; deadline_=now_+20000;
-        status("Waiting for partner initialization"); send_peer(protocol::bytes(protocol::login_text(request)));
-    }
-    void Session::peer_frame(const Bytes& body) {
-        auto envelope=protocol::parse_envelope(body);
-        if(envelope.system) return;
-        // Only the bounded hash-bound command26 can migrate an established route.
-        Parts parts;
-        if(!same_route(envelope.route,lookup_.route)) {
-            try {parts=protocol::parse_multipart(envelope.payload);} catch(const std::exception&) {return;}
-            if(parts.size()<2 || parts[0].empty() || parts[0][0]!=26 ||
-                    parts[1]!=protocol::bytes(connection_hash_)) return;
-        } else parts=protocol::parse_multipart(envelope.payload);
-        if(parts.empty() || parts[0].empty()) throw std::runtime_error("Empty peer command");
-        const auto command=parts[0][0];
-        if(command==0 && (phase_==Phase::Login || phase_==Phase::Active)) {
-            if(parts.size()<11) throw std::runtime_error("Incomplete modern initialization");
-            const auto reported=protocol::text(parts[6]);
-            const auto peer_version=PeerVersion::parse(reported);
-            const auto preview=PeerVersion::describe(reported);
-            keyboard_supported_=peer_version.at_least({6,2,13});
-            if(callbacks_.diagnostic)callbacks_.diagnostic("peer_init version=\""+preview+
-                    "\"; version_bytes="+std::to_string(parts[6].size())+
-                    "; parser="+(peer_version.valid?"valid":"invalid")+
-                    "; keyboard_mode="+(keyboard_supported_?"modern-binary":peer_version.valid?"blocked-legacy-unimplemented":"blocked-invalid-version"));
-            if(!peer_version.at_least({6,0,0})) throw std::runtime_error("Unsupported or malformed peer screen version; see session log");
-            version_=reported;
-            renderer_->configure(parts);
+        if (parts.size() < 2 || parts[0].empty() || parts[0][0] != 26 ||
+            parts[1] != protocol::bytes(connection_hash_))
+            return;
+    } else
+        parts = protocol::parse_multipart(envelope.payload);
+    if (parts.empty() || parts[0].empty())
+        throw std::runtime_error("Empty peer command");
+    const auto command = parts[0][0];
+    if (command == 0 && (phase_ == Phase::Login || phase_ == Phase::Active)) {
+        if (parts.size() < 11)
+            throw std::runtime_error("Incomplete modern initialization");
+        const auto reported = protocol::text(parts[6]);
+        const auto peer_version = PeerVersion::parse(reported);
+        const auto preview = PeerVersion::describe(reported);
+        keyboard_supported_ = peer_version.at_least({6, 2, 13});
+        if (callbacks_.diagnostic)
+            callbacks_.diagnostic("peer_init version=\"" + preview +
+                                  "\"; version_bytes=" + std::to_string(parts[6].size()) +
+                                  "; parser=" + (peer_version.valid ? "valid" : "invalid") +
+                                  "; keyboard_mode=" +
+                                  (keyboard_supported_  ? "modern-binary"
+                                   : peer_version.valid ? "blocked-legacy-unimplemented"
+                                                        : "blocked-invalid-version"));
+        if (!peer_version.at_least({6, 0, 0}))
+            throw std::runtime_error(
+                "Unsupported or malformed peer screen version; see session log");
+        version_ = reported;
+        renderer_->configure(parts);
 
-            // Reference initializes remoteViewOnly=false. Accepted init permits the
-            // normal control capability when optional command49 was omitted.
-            // A command49 seen before init is authoritative and is never reset here.
-            if(!permission_reported_) allowed_=true;
-            phase_=Phase::Active; deadline_=0;
-            permission_diagnostic(permission_reported_?"host-command49-preserved":"accepted-init-default");
-            if(!heartbeat_at_) heartbeat_at_=now_+10000;
-            if(callbacks_.accepted) callbacks_.accepted(true);
-            if(callbacks_.permission) callbacks_.permission(allowed_);
-            status("Connected; waiting for screen"); send_peer(protocol::bytes("17"));
-        } else if(command==1 && active()) {
-            auto frame=renderer_->apply(parts);
-            if(callbacks_.frame) callbacks_.frame(std::move(frame));
-            send_peer(protocol::bytes("18"));
-            status("Connected");
-        } else if(command==49) {
-            if(parts.size()<2 || parts[1].empty()) throw std::runtime_error("Invalid input permission");
-            const bool allowed=parts[1][0]==0;
-            if(!allowed) release_inputs();
-            allowed_=allowed; permission_reported_=true;
-            permission_diagnostic("host-command49-byte-"+std::to_string(parts[1][0]));
-            if(callbacks_.permission) callbacks_.permission(active()&&allowed_);
-        } else if(command==48 && active()) renderer_->set_tile_size(parts);
-        else if(command==23 && active()) {release_inputs(); login(-1,false);}
-        else if(command==26 && parts.size()>1 && parts[1]==protocol::bytes(connection_hash_)) {
-            release_inputs(); lookup_.route=envelope.route;
-            renderer_=std::make_unique<ScreenRenderer>(); renderer_->load_dictionary(config_.dictionary_path);
-            if(active()) login(-1,true);
-        } else if(command==27 || command==41 || command==54 || command==39) {
-            fail(command==39?"Partner blocked the connection":"Partner ended the session");
+        // Reference initializes remoteViewOnly=false. Accepted init permits the
+        // normal control capability when optional command49 was omitted.
+        // A command49 seen before init is authoritative and is never reset here.
+        if (!permission_reported_)
+            allowed_ = true;
+        phase_ = Phase::Active;
+        deadline_ = 0;
+        permission_diagnostic(permission_reported_ ? "host-command49-preserved"
+                                                   : "accepted-init-default");
+        if (!heartbeat_at_)
+            heartbeat_at_ = now_ + 10000;
+        if (callbacks_.accepted)
+            callbacks_.accepted(true);
+        if (callbacks_.permission)
+            callbacks_.permission(allowed_);
+        status("Connected; waiting for screen");
+        send_peer(protocol::bytes("17"));
+    } else if (command == 1 && active()) {
+        auto frame = renderer_->apply(parts);
+        if (callbacks_.frame)
+            callbacks_.frame(std::move(frame));
+        send_peer(protocol::bytes("18"));
+        status("Connected");
+    } else if (command == 49) {
+        if (parts.size() < 2 || parts[1].empty())
+            throw std::runtime_error("Invalid input permission");
+        const bool allowed = parts[1][0] == 0;
+        if (!allowed)
+            release_inputs();
+        allowed_ = allowed;
+        permission_reported_ = true;
+        permission_diagnostic("host-command49-byte-" + std::to_string(parts[1][0]));
+        if (callbacks_.permission)
+            callbacks_.permission(active() && allowed_);
+    } else if (command == 48 && active())
+        renderer_->set_tile_size(parts);
+    else if (command == 23 && active()) {
+        release_inputs();
+        login(-1, false);
+    } else if (command == 26 && parts.size() > 1 && parts[1] == protocol::bytes(connection_hash_)) {
+        release_inputs();
+        lookup_.route = envelope.route;
+        renderer_ = std::make_unique<ScreenRenderer>();
+        renderer_->load_dictionary(config_.dictionary_path);
+        if (active())
+            login(-1, true);
+    } else if (command == 27 || command == 41 || command == 54 || command == 39) {
+        fail(command == 39 ? "Partner blocked the connection" : "Partner ended the session");
+    }
+}
+std::uint16_t Session::mouse_flags() const {
+    std::uint16_t flags = 0;
+    if (held_buttons_.count(1))
+        flags |= 1;
+    if (held_buttons_.count(2))
+        flags |= 2;
+    if (held_buttons_.count(3))
+        flags |= 16;
+    for (const auto &entry : held_keys_) {
+        auto key = entry.second.virtual_key;
+        if (key == 0x10 || key == 0xa0 || key == 0xa1)
+            flags |= 4;
+        if (key == 0x11 || key == 0xa2 || key == 0xa3)
+            flags |= 8;
+    }
+    return flags;
+}
+void Session::input(const InputEvent &event) {
+    try {
+        if (event.kind == InputEvent::Kind::ReleaseAll) {
+            release_inputs();
+            return;
         }
-    }
-    std::uint16_t Session::mouse_flags() const {
-        std::uint16_t flags=0;
-        if(held_buttons_.count(1)) flags|=1;
-        if(held_buttons_.count(2)) flags|=2;
-        if(held_buttons_.count(3)) flags|=16;
-        for(const auto& entry:held_keys_) {
-            auto key=entry.second.virtual_key;
-            if(key==0x10||key==0xa0||key==0xa1) flags|=4;
-            if(key==0x11||key==0xa2||key==0xa3) flags|=8;
+        if (!active() || !allowed_ || !enabled_) {
+            ++gated_input_;
+            return;
         }
-        return flags;
-    }
-    void Session::input(const InputEvent& event) {
-        try {
-            if(event.kind==InputEvent::Kind::ReleaseAll) {release_inputs(); return;}
-            if(!active()||!allowed_||!enabled_) {++gated_input_;return;}
-            if(event.kind==InputEvent::Kind::Key) {
-                if(!keyboard_supported_) {
-                    ++blocked_keyboard_;
-                    if(blocked_keyboard_==1&&callbacks_.diagnostic)callbacks_.diagnostic("keyboard_gate peer_version="+PeerVersion::describe(version_)+"; reason=binary-requires-6.2.13; legacy-typing=unimplemented");
-                    status("Keyboard unavailable: peer reports "+version_+"; binary keyboard needs 6.2.13 or newer");return;
-                }
-                const auto id=event.virtual_key|(event.scan_code<<8)|(event.extended?0x1000000u:0u);
-                if(event.pressed) held_keys_[id]=event;
-                else held_keys_.erase(id);
-            } else if(event.kind==InputEvent::Kind::Button) {
-                if(event.pressed) held_buttons_[event.button]=event;
-                else held_buttons_.erase(event.button);
+        if (event.kind == InputEvent::Kind::Key) {
+            if (!keyboard_supported_) {
+                ++blocked_keyboard_;
+                if (blocked_keyboard_ == 1 && callbacks_.diagnostic)
+                    callbacks_.diagnostic(
+                        "keyboard_gate peer_version=" + PeerVersion::describe(version_) +
+                        "; reason=binary-requires-6.2.13; legacy-typing=unimplemented");
+                status("Keyboard unavailable: peer reports " + version_ +
+                       "; binary keyboard needs 6.2.13 or newer");
+                return;
             }
-            if(event.kind!=InputEvent::Kind::Key) {pointer_x_=event.x;pointer_y_=event.y;}
-            send_peer(protocol::input_payload(event,mouse_flags()));
-            ++forwarded_input_;
-        } catch(const std::exception& e) {fail(e.what());}
+            const auto id =
+                event.virtual_key | (event.scan_code << 8) | (event.extended ? 0x1000000u : 0u);
+            if (event.pressed)
+                held_keys_[id] = event;
+            else
+                held_keys_.erase(id);
+        } else if (event.kind == InputEvent::Kind::Button) {
+            if (event.pressed)
+                held_buttons_[event.button] = event;
+            else
+                held_buttons_.erase(event.button);
+        }
+        if (event.kind != InputEvent::Kind::Key) {
+            pointer_x_ = event.x;
+            pointer_y_ = event.y;
+        }
+        send_peer(protocol::input_payload(event, mouse_flags()));
+        ++forwarded_input_;
+    } catch (const std::exception &e) {
+        fail(e.what());
     }
-    void Session::release_inputs() {
-        // Releases bypass permission gates only for inputs sent by this session.
-        auto keys=std::move(held_keys_); held_keys_.clear();
-        auto buttons=std::move(held_buttons_); held_buttons_.clear();
-        if(!active()) return;
-        for(auto& entry:keys) {entry.second.pressed=false; send_peer(protocol::input_payload(entry.second,mouse_flags()));}
-        for(auto& entry:buttons) {entry.second.x=pointer_x_;entry.second.y=pointer_y_;entry.second.pressed=false; send_peer(protocol::input_payload(entry.second,mouse_flags()));}
+}
+void Session::release_inputs() {
+    // Releases bypass permission gates only for inputs sent by this session.
+    auto keys = std::move(held_keys_);
+    held_keys_.clear();
+    auto buttons = std::move(held_buttons_);
+    held_buttons_.clear();
+    if (!active())
+        return;
+    for (auto &entry : keys) {
+        entry.second.pressed = false;
+        send_peer(protocol::input_payload(entry.second, mouse_flags()));
     }
-    void Session::control_enabled(bool enabled) {
-        try {if(!enabled) release_inputs(); enabled_=enabled; permission_diagnostic("local-toggle");}
-        catch(const std::exception& e) {fail(e.what());}
+    for (auto &entry : buttons) {
+        entry.second.x = pointer_x_;
+        entry.second.y = pointer_y_;
+        entry.second.pressed = false;
+        send_peer(protocol::input_payload(entry.second, mouse_flags()));
     }
-    void Session::disconnect() {
-        if((blocked_keyboard_||gated_input_||forwarded_input_)&&callbacks_.diagnostic)
-            callbacks_.diagnostic("input_summary forwarded_events="+std::to_string(forwarded_input_)+
-                    "; gated_events="+std::to_string(gated_input_)+"; blocked_keyboard_events="+std::to_string(blocked_keyboard_));
-        blocked_keyboard_=0;gated_input_=0;forwarded_input_=0;
-        try {release_inputs(); if(active()) send_peer(protocol::bytes("19"));} catch(...) {}
-        phase_=Phase::Closed; deadline_=0; heartbeat_at_=0; enabled_=false; allowed_=false;
-        credentials_.password.clear();
-        if(callbacks_.close) callbacks_.close();
-        if(callbacks_.permission) callbacks_.permission(false);
-        if(callbacks_.accepted) callbacks_.accepted(false);
-        renderer_.reset();
+}
+void Session::control_enabled(bool enabled) {
+    try {
+        if (!enabled)
+            release_inputs();
+        enabled_ = enabled;
+        permission_diagnostic("local-toggle");
+    } catch (const std::exception &e) {
+        fail(e.what());
     }
-    void Session::fail(const std::string& message) {disconnect(); status(message);}
-    void Session::transport_error(const std::string& message) {if(phase_!=Phase::Closed) fail(message);}
-    void Session::tick(std::int64_t now_ms) {
-        now_=now_ms;
-        try {
-            if(deadline_ && now_>=deadline_) {fail("Connection stage timed out"); return;}
-            if(active() && heartbeat_at_ && now_>=heartbeat_at_) {
-                heartbeat_at_=now_+10000;
-                callbacks_.send(Channel::Peer,protocol::system(protocol::bytes("ping")));
-                send_peer(protocol::bytes("20"));
-                if(++heartbeat_count_%6==0) callbacks_.send(Channel::Command,protocol::command_envelope("2"));
-            }
-        } catch(const std::exception& e) {fail(e.what());}
+}
+void Session::disconnect() {
+    if ((blocked_keyboard_ || gated_input_ || forwarded_input_) && callbacks_.diagnostic)
+        callbacks_.diagnostic("input_summary forwarded_events=" + std::to_string(forwarded_input_) +
+                              "; gated_events=" + std::to_string(gated_input_) +
+                              "; blocked_keyboard_events=" + std::to_string(blocked_keyboard_));
+    blocked_keyboard_ = 0;
+    gated_input_ = 0;
+    forwarded_input_ = 0;
+    try {
+        release_inputs();
+        if (active())
+            send_peer(protocol::bytes("19"));
+    } catch (...) {
     }
+    phase_ = Phase::Closed;
+    deadline_ = 0;
+    heartbeat_at_ = 0;
+    enabled_ = false;
+    allowed_ = false;
+    credentials_.password.clear();
+    if (callbacks_.close)
+        callbacks_.close();
+    if (callbacks_.permission)
+        callbacks_.permission(false);
+    if (callbacks_.accepted)
+        callbacks_.accepted(false);
+    renderer_.reset();
+}
+void Session::fail(const std::string &message) {
+    disconnect();
+    status(message);
+}
+void Session::transport_error(const std::string &message) {
+    if (phase_ != Phase::Closed)
+        fail(message);
+}
+void Session::tick(std::int64_t now_ms) {
+    now_ = now_ms;
+    try {
+        if (deadline_ && now_ >= deadline_) {
+            fail("Connection stage timed out");
+            return;
+        }
+        if (active() && heartbeat_at_ && now_ >= heartbeat_at_) {
+            heartbeat_at_ = now_ + 10000;
+            callbacks_.send(Channel::Peer, protocol::system(protocol::bytes("ping")));
+            send_peer(protocol::bytes("20"));
+            if (++heartbeat_count_ % 6 == 0)
+                callbacks_.send(Channel::Command, protocol::command_envelope("2"));
+        }
+    } catch (const std::exception &e) {
+        fail(e.what());
+    }
+}
 } // namespace lunaviewer
