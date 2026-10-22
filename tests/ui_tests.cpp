@@ -1,6 +1,7 @@
 #include "lunaviewer/ui.hpp"
 #include <QApplication>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QFocusEvent>
 #include <QImage>
 #include <QKeyEvent>
@@ -59,12 +60,19 @@ int main(int argc, char **argv) {
         Credentials credentials;
         bool connect_called = false;
         int disconnects = 0;
-        ControllerWindow window({[&](Credentials c) {
-                                     credentials = std::move(c);
-                                     connect_called = true;
-                                 },
-                                 [&] { ++disconnects; }, [](bool) {},
-                                 [&](InputEvent e) { events.push_back(e); }});
+        int selected_quality = 45;
+        bool selected_wallpaper = true;
+        WindowCallbacks callbacks{[&](Credentials c) {
+                                      credentials = std::move(c);
+                                      connect_called = true;
+                                  },
+                                  [&] { ++disconnects; }, [](bool) {},
+                                  [&](InputEvent e) { events.push_back(e); }};
+        callbacks.visual_preferences_changed = [&](int quality, bool wallpaper) {
+            selected_quality = quality;
+            selected_wallpaper = wallpaper;
+        };
+        ControllerWindow window(std::move(callbacks));
         window.show();
         application.processEvents();
         auto *canvas = window.findChild<QWidget *>("remoteCanvas");
@@ -73,7 +81,18 @@ int main(int argc, char **argv) {
         auto *password = window.findChild<QLineEdit *>("password");
         auto *connect = window.findChild<QPushButton *>("connectButton");
         auto *disconnect = window.findChild<QPushButton *>("disconnectButton");
+        auto *quality = window.findChild<QComboBox *>("remoteQuality");
+        auto *wallpaper = window.findChild<QCheckBox *>("renderWallpaper");
         check(canvas && toggle && target && password && connect && disconnect, "named UI controls");
+        check(quality && wallpaper && quality->currentData().toInt() == 45 &&
+                  wallpaper->isChecked(),
+              "visual setting defaults");
+        quality->setCurrentIndex(2);
+        wallpaper->setChecked(false);
+        check(selected_quality == 70 && !selected_wallpaper, "visual setting callbacks");
+        window.set_performance({12.0, 64.0, 3.5, 1920, 1080});
+        check(window.findChild<QLabel *>("screenPerformance")->text().contains("12.0 FPS"),
+              "performance metrics rendered");
         check(!toggle->isEnabled() && !toggle->isChecked(), "control starts gated");
         window.set_remote_permission(false);
         check(window.findChild<QLabel *>("remotePermission")->text().endsWith("unavailable"),

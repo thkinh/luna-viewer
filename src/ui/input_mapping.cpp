@@ -17,15 +17,16 @@ bool map_position(const Geometry &g, const QSizeF &view, const QPointF &point, Q
     const auto rect = frame_rect(g, view);
     if (rect.isEmpty() || !std::isfinite(point.x()) || !std::isfinite(point.y()))
         return false;
-    if (!clamp && (point.x() < rect.left() || point.x() >= rect.right() || point.y() < rect.top() ||
-                   point.y() >= rect.bottom()))
+
+    if (!clamp && (point.x() < rect.left() || point.x() >= rect.right() || point.y() < rect.top() || point.y() >= rect.bottom()))
         return false;
+
     const auto x =
-        std::max(0.0, std::min(double(g.width - 1),
-                               std::floor((point.x() - rect.left()) * g.width / rect.width())));
+        std::max(0.0, std::min(double(g.width - 1), std::floor((point.x() - rect.left()) * g.width / rect.width())));
+
     const auto y =
-        std::max(0.0, std::min(double(g.height - 1),
-                               std::floor((point.y() - rect.top()) * g.height / rect.height())));
+        std::max(0.0, std::min(double(g.height - 1), std::floor((point.y() - rect.top()) * g.height / rect.height())));
+
     const auto rx = double(g.left) + x, ry = double(g.top) + y;
     if (rx < std::numeric_limits<int>::min() || rx > std::numeric_limits<int>::max() ||
         ry < std::numeric_limits<int>::min() || ry > std::numeric_limits<int>::max())

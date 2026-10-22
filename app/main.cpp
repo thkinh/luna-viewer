@@ -14,6 +14,7 @@
 #include <QThread>
 #include <QTimer>
 #include <QStatusBar>
+#include <QSettings>
 #include <atomic>
 #include <csignal>
 #include <deque>
@@ -111,6 +112,9 @@ class Worker : public QObject {
         c.accepted = [this, token](bool accepted) { ui_->accepted(token, accepted); };
         c.permission = [this, token](bool allowed) { ui_->permission(token, allowed); };
         c.frame = [this, token](FrameSnapshot frame) { ui_->frame(token, std::move(frame)); };
+        c.performance = [this, token](const PerformanceStats &stats) {
+            ui_->performance(token, stats);
+        };
         session_ = std::make_unique<Session>(config_, std::move(c));
         session_->start(std::move(credentials), clock_.elapsed());
     }
@@ -123,6 +127,12 @@ class Worker : public QObject {
     void control(bool enabled, std::uint64_t token) {
         if (valid(token) && session_)
             session_->control_enabled(enabled);
+    }
+    void visual_preferences(int quality, bool wallpaper, std::uint64_t token) {
+        config_.display_quality = quality;
+        config_.render_wallpaper = wallpaper;
+        if (valid(token) && session_)
+            session_->set_visual_preferences(quality, wallpaper);
     }
     void shutdown() {
         if (timer_)
@@ -153,6 +163,10 @@ class Worker : public QObject {
 };
 SessionConfig load_config(const QCommandLineParser &args) {
     SessionConfig c;
+    QSettings preferences;
+    const int saved_quality = preferences.value("displayQuality", 45).toInt();
+    c.display_quality = saved_quality == 30 || saved_quality == 70 ? saved_quality : 45;
+    c.render_wallpaper = preferences.value("renderWallpaper", true).toBool();
     c.command.connect_address = "functions3.ultraviewer.net";
     c.command.verify_name = "functions3.ultraviewer.net";
     c.command.http_host = c.command.verify_name;
@@ -201,6 +215,7 @@ int main(int argc, char **argv) {
     QApplication app(argc, argv);
     QCoreApplication::setApplicationName("LunaViewer");
     QCoreApplication::setApplicationVersion("0.1.0");
+    QCoreApplication::setOrganizationName("LunaViewer");
     QCommandLineParser args;
     args.setApplicationDescription(
         "Experimental relay controller; Windows interoperability is not yet validated.");
@@ -258,8 +273,20 @@ int main(int argc, char **argv) {
                 worker, [worker, token, enabled] { worker->control(enabled, token); },
                 Qt::QueuedConnection);
         };
+        callbacks.visual_preferences_changed = [worker, ui](int quality, bool wallpaper) {
+            const auto token = ui->generation();
+            QSettings preferences;
+            preferences.setValue("displayQuality", quality);
+            preferences.setValue("renderWallpaper", wallpaper);
+            QMetaObject::invokeMethod(
+                worker, [worker, token, quality, wallpaper] {
+                    worker->visual_preferences(quality, wallpaper, token);
+                },
+                Qt::QueuedConnection);
+        };
         callbacks.input = [ui](InputEvent input) { ui->input(input); };
-        ControllerWindow window(std::move(callbacks));
+        ControllerWindow window(std::move(callbacks), config.display_quality,
+                                config.render_wallpaper);
         window.statusBar()->showMessage(QString::fromStdString(log_banner));
         QTimer present;
         QObject::connect(&present, &QTimer::timeout, &window, [&window, ui] {
@@ -272,6 +299,8 @@ int main(int argc, char **argv) {
                 window.set_status(*update.status);
             if (update.frame && update.connected)
                 window.display_frame(std::move(update.frame));
+            if (update.performance)
+                window.set_performance(*update.performance);
         });
         present.start(16);
         thread.start();

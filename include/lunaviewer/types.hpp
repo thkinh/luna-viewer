@@ -16,6 +16,14 @@ struct Frame {
     Bytes bgra;
 };
 
+struct PerformanceStats {
+    double decoded_fps = 0.0;
+    double payload_kib_per_second = 0.0;
+    double average_decode_ms = 0.0;
+    int width = 0, height = 0;
+    std::uint64_t frames_in_window = 0;
+};
+
 using FrameSnapshot = std::shared_ptr<const Frame>;
 struct InputEvent {
     enum class Kind { Move, Button, Wheel, Key, ReleaseAll };

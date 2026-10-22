@@ -52,6 +52,9 @@ def main():
 
         template = Path(__file__).resolve().parents[1] / "identity-profile.example.json"
         profile = json.loads(template.read_text(encoding="utf-8"))
+        hostname = socket.gethostname().encode("ascii", "ignore").decode("ascii")
+        hostname = "".join(c for c in hostname if c.isalnum() or c == "-") or "linux"
+        profile["display_name"] = ("LunaViewer-" + hostname)[:20]
         fields = profile["registration_fields"]
         fields[1] = secrets.token_hex(16).upper()
         fields[2] = f"{secrets.randbelow(100_000_000):08d}"

@@ -2,6 +2,7 @@
 #include "lunaviewer/protocol.hpp"
 #include "lunaviewer/screen.hpp"
 #include "lunaviewer/transport.hpp"
+#include <chrono>
 #include <functional>
 #include <map>
 namespace lunaviewer {
@@ -11,6 +12,8 @@ struct SessionConfig {
     std::vector<std::string> registration;
     std::string dictionary_path;
     std::string display_name = "LunaViewer";
+    int display_quality = 45;
+    bool render_wallpaper = true;
     bool require_dictionary = true; // Disable only for synthetic offline fixture sessions.
     int local_width = 1280, local_height = 720, utc_offset_minutes = 0;
 };
@@ -21,6 +24,7 @@ struct SessionCallbacks {
     std::function<void(const std::string &)> status, diagnostic;
     std::function<void(bool)> permission, accepted;
     std::function<void(FrameSnapshot)> frame;
+    std::function<void(const PerformanceStats &)> performance;
 };
 // All entrypoints execute on the same serialized executor. No Qt dependency.
 class Session {
@@ -32,6 +36,7 @@ class Session {
     void tick(std::int64_t now_ms);
     void control_enabled(bool enabled);
     void input(const InputEvent &event);
+    void set_visual_preferences(int display_quality, bool render_wallpaper);
     void disconnect();
     void transport_error(const std::string &message);
     bool active() const;
@@ -54,7 +59,7 @@ class Session {
     std::map<std::uint32_t, InputEvent> held_keys_;
     std::map<int, InputEvent> held_buttons_;
     std::uint16_t mouse_flags() const;
-    void send_peer(const Bytes &payload);
+    void send_peer(const Bytes &payload, bool format = false);
     void login(int mode = 0, bool clear = false);
     void release_inputs();
     void fail(const std::string &message);
@@ -62,5 +67,9 @@ class Session {
     void permission_diagnostic(const std::string &source);
     void command_frame(const Bytes &body);
     void peer_frame(const Bytes &body);
+    bool visual_preferences_dirty_ = false;
+    std::chrono::steady_clock::time_point performance_window_start_{};
+    std::uint64_t performance_frames_ = 0, performance_payload_bytes_ = 0;
+    double performance_decode_ms_ = 0.0;
 };
 } // namespace lunaviewer

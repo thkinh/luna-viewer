@@ -80,6 +80,7 @@ struct LoginRequest {
     std::string password, nonce, local_id, display_name = "LunaViewer", connection_hash,
                                            secret_token, version = "6.6.133";
     int width = 1280, height = 720, control_mode = 0;
+    int display_quality = 45, remote_wallpaper_disabled = 0;
     bool clear_control_mode = false;
 };
 

@@ -40,7 +40,7 @@ The tests use local fixtures and do not connect to UltraViewer services.
    python3 tools/create_identity_profile.py
    ```
 
-   The script detects the default IPv4 route and creates `identity-profile.json` with mode `0600`. It does not contact any server and refuses to overwrite an existing profile. Keep this file for future runs; it contains this installation's local registration identity. If you use a VPN or several network interfaces, choose one explicitly:
+   The script detects the default IPv4 route and creates `identity-profile.json` with mode `0600`. It names this client `LunaViewer-<hostname>` in the Windows client log (the protocol limits that name to 20 characters). It does not contact any server and refuses to overwrite an existing profile. Keep this file for future runs; it contains this installation's local registration identity. If you use a VPN or several network interfaces, choose one explicitly:
 
    ```sh
    python3 tools/create_identity_profile.py --interface enp3s0 --local-ip 192.168.1.20
@@ -57,6 +57,12 @@ The tests use local fixtures and do not connect to UltraViewer services.
 4. Enter the Windows computer's UltraViewer ID and password. Connect, then enable **Enable remote control** when the host permits control. The Windows peer's password is entered in the app; it is not stored in the local identity profile.
 
 On a Wayland desktop, if Qt reports that the XCB platform cannot connect to the display, try launching with `QT_QPA_PLATFORM=wayland` before the command above.
+
+## Screen settings and performance
+
+Open the **Settings** tab while connected to change remote image quality or toggle **Render background wallpaper**. The quality presets are Speed (30), Automatic (45, the default), and Quality (70); LunaViewer sends these choices to the Windows peer, which determines the resulting image and bandwidth. Wallpaper and quality preferences are saved for future launches.
+
+The Settings tab reports decoded frames per second, compressed screen payload in KiB/s, average local decode time, and remote canvas dimensions. These measurements help distinguish host/network limits from local decoding cost; payload rate excludes transport overhead.
 
 ## Logs
 

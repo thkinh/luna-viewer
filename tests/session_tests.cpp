@@ -2,6 +2,7 @@
 #include <zstd.h>
 #include <iostream>
 #include <stdexcept>
+#include <thread>
 using namespace lunaviewer;
 namespace {
 void check(bool condition, const char *message) {
@@ -38,15 +39,18 @@ struct Harness {
     std::vector<std::pair<Channel, TlsConfig>> opened;
     std::vector<std::string> order;
     FrameSnapshot frame;
+    std::vector<PerformanceStats> performance;
     Parts initialization;
     bool permission = false, accepted = false;
+    bool render_wallpaper = true;
     std::string status;
     std::vector<std::string> diagnostics;
     int closed = 0, accepted_events = 0;
     std::unique_ptr<Session> session;
     protocol::Route route{"192.0.2.2", 4444};
-    Harness() {
+    explicit Harness(bool wallpaper = true) : render_wallpaper(wallpaper) {
         SessionConfig config;
+        config.render_wallpaper = wallpaper;
         config.require_dictionary = false;
         config.command = {"127.0.0.1", "ultraviewer", "command.example", "command.example", 443};
         config.registration = std::vector<std::string>(28, "0");
@@ -82,6 +86,7 @@ struct Harness {
             frame = std::move(f);
             order.push_back("frame");
         };
+        c.performance = [this](const PerformanceStats &stats) { performance.push_back(stats); };
         session = std::make_unique<Session>(config, std::move(c));
     }
     void start() {
@@ -141,6 +146,8 @@ struct Harness {
         auto login = split(protocol::text(protocol::parse_envelope(sent.back().second).payload));
         check(login.size() == 23 && login[0] == "login" && login[20] == "secret-token",
               "login fields");
+        check(login[17] == "45" && login[18] == (render_wallpaper ? "0" : "-1"),
+              "login visual preferences");
         if (prior_permission >= 0)
             receive({Bytes{49}, Bytes{static_cast<std::uint8_t>(prior_permission)}});
         Parts init(11);
@@ -219,6 +226,9 @@ int main() {
         check(threshold.sent.size() == threshold_before + 1,
               "binary threshold did not enable keyboard");
         threshold.session->disconnect();
+        Harness wallpaper_disabled(false);
+        wallpaper_disabled.connect();
+        wallpaper_disabled.session->disconnect();
         Harness implicit;
         implicit.connect();
         check(implicit.permission, "omitted command49 left accepted session denied");
@@ -237,6 +247,26 @@ int main() {
         check(implicit.sent.size() == implicit_before + 1,
               "source default did not permit locally enabled input");
         implicit.session->disconnect();
+        Harness visual;
+        visual.connect();
+        const auto visual_before = visual.sent.size();
+        visual.session->set_visual_preferences(70, false);
+        check(visual.sent.size() == visual_before + 3, "live visual settings not sent");
+        const auto color_message = protocol::parse_envelope(visual.sent[visual_before].second);
+        const auto quality_message = protocol::parse_envelope(visual.sent[visual_before + 1].second);
+        const auto wallpaper_message = protocol::parse_envelope(visual.sent[visual_before + 2].second);
+        check(!color_message.format && color_message.payload == protocol::bytes("32|||2"),
+              "RGB555 color mode command encoding");
+        check(!quality_message.format && quality_message.payload == protocol::bytes("31|||70"),
+              "quality command encoding");
+        Bytes wallpaper_expected;
+        for (unsigned char c : std::string("23|||0")) {
+            wallpaper_expected.push_back(c);
+            wallpaper_expected.push_back(0);
+        }
+        check(wallpaper_message.format && wallpaper_message.payload == wallpaper_expected,
+              "wallpaper command encoding");
+        visual.session->disconnect();
         Harness denied;
         denied.connect(1);
         check(!denied.permission, "prior host denial overridden by init default");
@@ -269,6 +299,16 @@ int main() {
         check(h.frame && h.frame->bgra == Bytes({0, 0, 255, 255}), "first decoded pixel");
         check(h.order == std::vector<std::string>({"frame", "ack"}),
               "ACK precedes commit publication");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1050));
+        h.session->tick(1050);
+        check(h.performance.size() == 1 && h.performance.back().frames_in_window == 1 &&
+                  h.performance.back().decoded_fps > 0.0,
+              "periodic performance sample omitted received frame");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1050));
+        h.session->tick(2100);
+        check(h.performance.size() == 2 && h.performance.back().frames_in_window == 0 &&
+                  h.performance.back().decoded_fps == 0.0,
+              "idle performance sample did not report zero FPS");
         auto before = h.sent.size();
         InputEvent key;
         key.kind = InputEvent::Kind::Key;

@@ -1,6 +1,7 @@
 #include "lunaviewer/ui.hpp"
 #include <QApplication>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QCloseEvent>
 #include <QFocusEvent>
 #include <QHBoxLayout>
@@ -11,6 +12,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPushButton>
+#include <QTabWidget>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 #include <limits>
@@ -224,32 +226,40 @@ struct ControllerWindow::Impl {
     QCheckBox *control = nullptr;
     QLabel *status = nullptr;
     QLabel *permission = nullptr;
+    QComboBox *quality = nullptr;
+    QCheckBox *wallpaper = nullptr;
+    QLabel *performance = nullptr;
     bool connected = false, remote_allowed = false;
     void update_control() {
         canvas->set_enabled(connected && remote_allowed && control->isChecked());
     }
 };
-ControllerWindow::ControllerWindow(WindowCallbacks callbacks, QWidget *parent)
+ControllerWindow::ControllerWindow(WindowCallbacks callbacks, int display_quality,
+                                   bool render_wallpaper, QWidget *parent)
     : QMainWindow(parent), impl_(new Impl) {
     auto &p = *impl_;
     p.callbacks = std::move(callbacks);
     setWindowTitle("LunaViewer");
     resize(1000, 700);
     auto *central = new QWidget(this);
-    auto *layout = new QVBoxLayout(central);
+    auto *outer = new QVBoxLayout(central);
+    auto *tabs = new QTabWidget(central);
+    tabs->setObjectName("applicationTabs");
+    auto *control_page = new QWidget(tabs);
+    auto *layout = new QVBoxLayout(control_page);
     auto *connection = new QHBoxLayout;
-    p.target = new QLineEdit(central);
+    p.target = new QLineEdit(control_page);
     p.target->setObjectName("targetId");
     p.target->setPlaceholderText("Partner ID");
     p.target->setAccessibleName("Partner ID");
-    p.password = new QLineEdit(central);
+    p.password = new QLineEdit(control_page);
     p.password->setObjectName("password");
     p.password->setEchoMode(QLineEdit::Password);
     p.password->setPlaceholderText("Password");
     p.password->setAccessibleName("Password");
-    p.connect_button = new QPushButton("Connect", central);
+    p.connect_button = new QPushButton("Connect", control_page);
     p.connect_button->setObjectName("connectButton");
-    p.disconnect_button = new QPushButton("Disconnect", central);
+    p.disconnect_button = new QPushButton("Disconnect", control_page);
     p.disconnect_button->setObjectName("disconnectButton");
     p.disconnect_button->setEnabled(false);
     connection->addWidget(p.target);
@@ -257,23 +267,54 @@ ControllerWindow::ControllerWindow(WindowCallbacks callbacks, QWidget *parent)
     connection->addWidget(p.connect_button);
     connection->addWidget(p.disconnect_button);
     layout->addLayout(connection);
-    p.status = new QLabel("Disconnected", central);
+    p.status = new QLabel("Disconnected", control_page);
     p.status->setObjectName("sessionStatus");
     p.status->setTextFormat(Qt::PlainText);
     p.status->setWordWrap(true);
     layout->addWidget(p.status);
     auto *controls = new QHBoxLayout;
-    p.control = new QCheckBox("Enable remote control", central);
+    p.control = new QCheckBox("Enable remote control", control_page);
     p.control->setObjectName("controlToggle");
     p.control->setEnabled(false);
     controls->addWidget(p.control);
-    p.permission = new QLabel("Remote control permission: unavailable", central);
+    p.permission = new QLabel("Remote control permission: unavailable", control_page);
     p.permission->setObjectName("remotePermission");
     controls->addWidget(p.permission);
     controls->addStretch();
     layout->addLayout(controls);
-    p.canvas = new ScreenCanvas(p.callbacks.input, central);
+    p.canvas = new ScreenCanvas(p.callbacks.input, control_page);
     layout->addWidget(p.canvas, 1);
+    tabs->addTab(control_page, "Control");
+
+    auto *settings_page = new QWidget(tabs);
+    auto *settings = new QVBoxLayout(settings_page);
+    auto *quality_row = new QHBoxLayout;
+    quality_row->addWidget(new QLabel("Remote image quality", settings_page));
+    p.quality = new QComboBox(settings_page);
+    p.quality->setObjectName("remoteQuality");
+    p.quality->addItem("Speed", 30);
+    p.quality->addItem("Automatic", 45);
+    p.quality->addItem("Quality", 70);
+    p.quality->setToolTip(
+        "Requests a remote quality preset. The Windows peer controls the resulting detail and rate.");
+    const int quality_index = p.quality->findData(display_quality);
+    p.quality->setCurrentIndex(quality_index >= 0 ? quality_index : 1);
+    quality_row->addWidget(p.quality);
+    quality_row->addStretch();
+    settings->addLayout(quality_row);
+    p.wallpaper = new QCheckBox("Render background wallpaper", settings_page);
+    p.wallpaper->setObjectName("renderWallpaper");
+    p.wallpaper->setChecked(render_wallpaper);
+    p.wallpaper->setToolTip("Ask the Windows peer to render or suppress its desktop wallpaper.");
+    settings->addWidget(p.wallpaper);
+    p.performance = new QLabel("No screen frames received yet", settings_page);
+    p.performance->setObjectName("screenPerformance");
+    p.performance->setToolTip(
+        "Decoded FPS and Zstandard/JPEG payload rate; excludes relay and transport overhead.");
+    settings->addWidget(p.performance);
+    settings->addStretch();
+    tabs->addTab(settings_page, "Settings");
+    outer->addWidget(tabs);
     setCentralWidget(central);
     QObject::connect(p.connect_button, &QPushButton::clicked, this, [this] {
         auto &s = *impl_;
@@ -302,6 +343,15 @@ ControllerWindow::ControllerWindow(WindowCallbacks callbacks, QWidget *parent)
         if (impl_->callbacks.control_enabled)
             impl_->callbacks.control_enabled(enabled);
     });
+    const auto notify_visual_preferences = [this] {
+        if (impl_->callbacks.visual_preferences_changed)
+            impl_->callbacks.visual_preferences_changed(impl_->quality->currentData().toInt(),
+                                                        impl_->wallpaper->isChecked());
+    };
+    QObject::connect(p.quality, qOverload<int>(&QComboBox::currentIndexChanged), this,
+                     [notify_visual_preferences](int) { notify_visual_preferences(); });
+    QObject::connect(p.wallpaper, &QCheckBox::toggled, this,
+                     [notify_visual_preferences](bool) { notify_visual_preferences(); });
     QObject::connect(qApp, &QApplication::applicationStateChanged, this,
                      [this](Qt::ApplicationState state) {
                          if (state != Qt::ApplicationActive)
@@ -350,6 +400,8 @@ void ControllerWindow::set_remote_permission(bool allowed) {
 }
 void ControllerWindow::set_connected(bool connected) {
     auto &p = *impl_;
+    p.performance->setText(connected ? "Collecting screen statistics…"
+                                     : "No screen frames received yet");
     if (!connected) {
         p.canvas->release();
         p.control->setChecked(false);
@@ -365,5 +417,21 @@ void ControllerWindow::set_connected(bool connected) {
     p.disconnect_button->setEnabled(connected);
     p.control->setEnabled(connected && p.remote_allowed);
     p.update_control();
+}
+void ControllerWindow::set_performance(const PerformanceStats &stats) {
+    if (!impl_->performance)
+        return;
+    const auto decode = stats.frames_in_window
+                            ? QString::number(stats.average_decode_ms, 'f', 1) + " ms/frame"
+                            : QString("— (no frames this second)");
+    impl_->performance->setText(QString("Decoded: %1 FPS\n"
+                                        "Compressed screen data: %2 KiB/s\n"
+                                        "Average decode: %3\n"
+                                        "Remote canvas: %4 × %5")
+                                    .arg(stats.decoded_fps, 0, 'f', 1)
+                                    .arg(stats.payload_kib_per_second, 0, 'f', 1)
+                                    .arg(decode)
+                                    .arg(stats.width)
+                                    .arg(stats.height));
 }
 } // namespace lunaviewer

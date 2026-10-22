@@ -10,6 +10,7 @@ struct UiUpdate {
     FrameSnapshot frame;
     std::optional<std::string> status;
     std::optional<bool> accepted, permission;
+    std::optional<PerformanceStats> performance;
     bool connected = false;
 };
 // One GUI consumer and one session producer. Generation checks and writes share
@@ -65,6 +66,11 @@ class UiMailbox {
         std::lock_guard<std::mutex> lock(mutex_);
         if (token == generation_ && !canceled_ && update_.connected)
             update_.frame = std::move(frame);
+    }
+    void performance(std::uint64_t token, const PerformanceStats &stats) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (token == generation_ && !canceled_)
+            update_.performance = stats;
     }
     UiUpdate take() {
         std::lock_guard<std::mutex> lock(mutex_);

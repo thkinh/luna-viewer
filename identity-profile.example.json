@@ -29,7 +29,7 @@
     "",
     ""
   ],
-  "display_name": "LunaViewer",
+  "display_name": "LunaViewer-hostname",
   "command_address": "functions3.ultraviewer.net",
   "command_hostname": "functions3.ultraviewer.net",
   "command_port": 443,

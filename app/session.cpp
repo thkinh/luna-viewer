@@ -2,12 +2,28 @@
 #include "peer_version.hpp"
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <sstream>
 #include <stdexcept>
 namespace lunaviewer {
 namespace {
 bool same_route(const protocol::Route &a, const protocol::Route &b) {
     return a.address == b.address && a.port == b.port;
+}
+Bytes utf16le(const std::string &text) {
+    Bytes result;
+    result.reserve(text.size() * 2);
+    for (unsigned char c : text) {
+        result.push_back(c);
+        result.push_back(0);
+    }
+    return result;
+}
+void send_visual_preferences(const SessionConfig &config,
+                             const std::function<void(const Bytes &, bool)> &send) {
+    send(protocol::bytes("32|||2"), false);
+    send(protocol::bytes("31|||" + std::to_string(config.display_quality)), false);
+    send(utf16le(std::string("23|||") + (config.render_wallpaper ? "-1" : "0")), true);
 }
 } // namespace
 Session::Session(SessionConfig config, SessionCallbacks callbacks)
@@ -134,8 +150,8 @@ void Session::command_frame(const Bytes &body) {
         callbacks_.open(Channel::Peer, peer);
     }
 }
-void Session::send_peer(const Bytes &payload) {
-    callbacks_.send(Channel::Peer, protocol::forward(lookup_.route, payload));
+void Session::send_peer(const Bytes &payload, bool format) {
+    callbacks_.send(Channel::Peer, protocol::forward(lookup_.route, payload, format));
 }
 void Session::login(int mode, bool clear) {
     protocol::LoginRequest request;
@@ -150,6 +166,8 @@ void Session::login(int mode, bool clear) {
     request.height = config_.local_height;
     request.control_mode = mode;
     request.clear_control_mode = clear;
+    request.display_quality = config_.display_quality;
+    request.remote_wallpaper_disabled = config_.render_wallpaper ? 0 : -1;
     phase_ = Phase::Login;
     deadline_ = now_ + 20000;
     status("Waiting for partner initialization");
@@ -207,16 +225,38 @@ void Session::peer_frame(const Bytes &body) {
                                                    : "accepted-init-default");
         if (!heartbeat_at_)
             heartbeat_at_ = now_ + 10000;
+        performance_window_start_ = std::chrono::steady_clock::now();
+        performance_frames_ = performance_payload_bytes_ = 0;
+        performance_decode_ms_ = 0.0;
         if (callbacks_.accepted)
             callbacks_.accepted(true);
         if (callbacks_.permission)
             callbacks_.permission(allowed_);
         status("Connected; waiting for screen");
         send_peer(protocol::bytes("17"));
+        if (visual_preferences_dirty_) {
+            send_visual_preferences(config_, [this](const Bytes &payload, bool format) {
+                send_peer(payload, format);
+            });
+            visual_preferences_dirty_ = false;
+        }
     } else if (command == 1 && active()) {
+        const auto decode_started = std::chrono::steady_clock::now();
         auto frame = renderer_->apply(parts);
+        const auto decode_ms = std::chrono::duration<double, std::milli>(
+                                   std::chrono::steady_clock::now() - decode_started)
+                                   .count();
         if (callbacks_.frame)
             callbacks_.frame(std::move(frame));
+        const auto now = std::chrono::steady_clock::now();
+        if (performance_window_start_.time_since_epoch().count() == 0)
+            performance_window_start_ = now;
+        ++performance_frames_;
+        performance_decode_ms_ += decode_ms;
+        if (parts.size() > 2)
+            performance_payload_bytes_ += parts[2].size();
+        if (parts.size() > 7)
+            performance_payload_bytes_ += parts[7].size();
         send_peer(protocol::bytes("18"));
         status("Connected");
     } else if (command == 49) {
@@ -244,6 +284,33 @@ void Session::peer_frame(const Bytes &body) {
             login(-1, true);
     } else if (command == 27 || command == 41 || command == 54 || command == 39) {
         fail(command == 39 ? "Partner blocked the connection" : "Partner ended the session");
+    }
+}
+void Session::set_visual_preferences(int display_quality, bool render_wallpaper) {
+    if (display_quality != 30 && display_quality != 45 && display_quality != 70) {
+        status("Unsupported display quality preset");
+        return;
+    }
+    try {
+        const bool quality_changed = config_.display_quality != display_quality;
+        const bool wallpaper_changed = config_.render_wallpaper != render_wallpaper;
+        config_.display_quality = display_quality;
+        config_.render_wallpaper = render_wallpaper;
+        if (!quality_changed && !wallpaper_changed)
+            return;
+        if (active()) {
+            if (quality_changed) {
+                send_peer(protocol::bytes("32|||2"));
+                send_peer(protocol::bytes("31|||" + std::to_string(display_quality)));
+            }
+            if (wallpaper_changed)
+                send_peer(utf16le(std::string("23|||") + (render_wallpaper ? "-1" : "0")),
+                          true);
+            visual_preferences_dirty_ = false;
+        } else
+            visual_preferences_dirty_ = true;
+    } catch (const std::exception &e) {
+        fail(e.what());
     }
 }
 std::uint16_t Session::mouse_flags() const {
@@ -374,6 +441,25 @@ void Session::transport_error(const std::string &message) {
 void Session::tick(std::int64_t now_ms) {
     now_ = now_ms;
     try {
+        if (active() && callbacks_.performance &&
+            performance_window_start_.time_since_epoch().count() != 0) {
+            const auto now = std::chrono::steady_clock::now();
+            const auto seconds = std::chrono::duration<double>(now - performance_window_start_).count();
+            if (seconds >= 1.0) {
+                PerformanceStats stats;
+                const auto geometry = renderer_->geometry();
+                stats.width = geometry.width;
+                stats.height = geometry.height;
+                stats.decoded_fps = performance_frames_ / seconds;
+                stats.payload_kib_per_second = performance_payload_bytes_ / 1024.0 / seconds;
+                stats.average_decode_ms = performance_frames_ ? performance_decode_ms_ / performance_frames_ : 0.0;
+                stats.frames_in_window = performance_frames_;
+                callbacks_.performance(stats);
+                performance_window_start_ = now;
+                performance_frames_ = performance_payload_bytes_ = 0;
+                performance_decode_ms_ = 0.0;
+            }
+        }
         if (deadline_ && now_ >= deadline_) {
             fail("Connection stage timed out");
             return;

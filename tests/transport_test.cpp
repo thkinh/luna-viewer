@@ -107,7 +107,11 @@ int main() {
         login.nonce = "12345678";
         login.password = "password";
         login.display_name = "Li:nux!";
-        check(login_text(login).find(":Linux:") != std::string::npos);
+        login.display_quality = 70;
+        login.remote_wallpaper_disabled = 1;
+        const auto login_payload = login_text(login);
+        check(login_payload.find(":Linux:") != std::string::npos &&
+              login_payload.find(":2:70:1:0:") != std::string::npos);
         login.nonce = "123";
         rejects([&] { login_text(login); });
         check(keyboard(1, 65, 0x1e, 65, true) == hex("1e7c7c7c01411e00410001"));
