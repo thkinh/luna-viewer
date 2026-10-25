@@ -225,6 +225,8 @@ struct ControllerWindow::Impl {
     QPushButton *disconnect_button = nullptr;
     QCheckBox *control = nullptr;
     QLabel *status = nullptr;
+    QLabel *fps = nullptr;
+    QLabel *data_rate = nullptr;
     QLabel *permission = nullptr;
     QComboBox *quality = nullptr;
     QCheckBox *wallpaper = nullptr;
@@ -271,7 +273,21 @@ ControllerWindow::ControllerWindow(WindowCallbacks callbacks, int display_qualit
     p.status->setObjectName("sessionStatus");
     p.status->setTextFormat(Qt::PlainText);
     p.status->setWordWrap(true);
-    layout->addWidget(p.status);
+    auto *status_row = new QHBoxLayout;
+    status_row->setObjectName("connectionStatusRow");
+    status_row->addWidget(p.status, 1);
+    p.fps = new QLabel("0.0 FPS", control_page);
+    p.fps->setObjectName("liveFps");
+    p.fps->setAccessibleName("Decoded frames per second");
+    p.fps->setToolTip("Decoded screen updates per second; idle screens can report zero.");
+    status_row->addWidget(p.fps);
+    p.data_rate = new QLabel("0.0 KiB/s", control_page);
+    p.data_rate->setObjectName("liveDataRate");
+    p.data_rate->setAccessibleName("Received screen data rate");
+    p.data_rate->setToolTip(
+        "Received compressed screen data per second; excludes transport overhead.");
+    status_row->addWidget(p.data_rate);
+    layout->addLayout(status_row);
     auto *controls = new QHBoxLayout;
     p.control = new QCheckBox("Enable remote control", control_page);
     p.control->setObjectName("controlToggle");
@@ -295,8 +311,8 @@ ControllerWindow::ControllerWindow(WindowCallbacks callbacks, int display_qualit
     p.quality->addItem("Speed", 30);
     p.quality->addItem("Automatic", 45);
     p.quality->addItem("Quality", 70);
-    p.quality->setToolTip(
-        "Requests a remote quality preset. The Windows peer controls the resulting detail and rate.");
+    p.quality->setToolTip("Requests a remote quality preset. The Windows peer controls the "
+                          "resulting detail and rate.");
     const int quality_index = p.quality->findData(display_quality);
     p.quality->setCurrentIndex(quality_index >= 0 ? quality_index : 1);
     quality_row->addWidget(p.quality);
@@ -310,7 +326,7 @@ ControllerWindow::ControllerWindow(WindowCallbacks callbacks, int display_qualit
     p.performance = new QLabel("No screen frames received yet", settings_page);
     p.performance->setObjectName("screenPerformance");
     p.performance->setToolTip(
-        "Decoded FPS and Zstandard/JPEG payload rate; excludes relay and transport overhead.");
+        "Decoded frame rate, local decoding time and remote canvas dimensions.");
     settings->addWidget(p.performance);
     settings->addStretch();
     tabs->addTab(settings_page, "Settings");
@@ -384,6 +400,10 @@ void ControllerWindow::display_frame(FrameSnapshot frame) {
 }
 void ControllerWindow::set_status(const std::string &status) {
     impl_->status->setText(QString::fromStdString(status));
+    if (!impl_->connected) {
+        impl_->fps->setText("0.0 FPS");
+        impl_->data_rate->setText("0.0 KiB/s");
+    }
 }
 void ControllerWindow::set_remote_permission(bool allowed) {
     auto &p = *impl_;
@@ -400,6 +420,10 @@ void ControllerWindow::set_remote_permission(bool allowed) {
 }
 void ControllerWindow::set_connected(bool connected) {
     auto &p = *impl_;
+    p.connected = connected;
+    p.fps->setText("0.0 FPS");
+    p.data_rate->setText("0.0 KiB/s");
+    set_status(connected ? "Connected" : "Disconnected");
     p.performance->setText(connected ? "Collecting screen statistics…"
                                      : "No screen frames received yet");
     if (!connected) {
@@ -408,9 +432,7 @@ void ControllerWindow::set_connected(bool connected) {
         p.remote_allowed = false;
         p.canvas->clear();
         p.permission->setText("Remote control permission: unavailable");
-        set_status("Disconnected");
     }
-    p.connected = connected;
     p.target->setEnabled(!connected);
     p.password->setEnabled(!connected);
     p.connect_button->setEnabled(!connected);
@@ -419,17 +441,17 @@ void ControllerWindow::set_connected(bool connected) {
     p.update_control();
 }
 void ControllerWindow::set_performance(const PerformanceStats &stats) {
-    if (!impl_->performance)
+    if (!impl_->connected)
         return;
+    impl_->fps->setText(QString("%1 FPS").arg(stats.decoded_fps, 0, 'f', 1));
+    impl_->data_rate->setText(QString("%1 KiB/s").arg(stats.payload_kib_per_second, 0, 'f', 1));
     const auto decode = stats.frames_in_window
                             ? QString::number(stats.average_decode_ms, 'f', 1) + " ms/frame"
                             : QString("— (no frames this second)");
     impl_->performance->setText(QString("Decoded: %1 FPS\n"
-                                        "Compressed screen data: %2 KiB/s\n"
-                                        "Average decode: %3\n"
-                                        "Remote canvas: %4 × %5")
+                                        "Average decode: %2\n"
+                                        "Remote canvas: %3 × %4")
                                     .arg(stats.decoded_fps, 0, 'f', 1)
-                                    .arg(stats.payload_kib_per_second, 0, 'f', 1)
                                     .arg(decode)
                                     .arg(stats.width)
                                     .arg(stats.height));

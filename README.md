@@ -6,6 +6,8 @@ This is my first project built with OpenAI Codex. I used Codex and multiple codi
 
 The current version has been used to view a Windows screen and send mouse and keyboard input. It is still a test project, not a production replacement for UltraViewer. Keyboard input requires a Windows peer running UltraViewer 6.2.13 or newer.
 
+![LunaViewer controlling a Windows desktop, with live FPS and data rate beside the connection status](Screenshot_20261025_094402.png)
+
 ## Build from source
 
 Requirements: C++17 compiler, CMake 3.20 or newer, Qt 6 Core/Network/Widgets, OpenSSL, Zstandard, and libjpeg-turbo with its TurboJPEG API.
@@ -62,7 +64,7 @@ On a Wayland desktop, if Qt reports that the XCB platform cannot connect to the 
 
 Open the **Settings** tab while connected to change remote image quality or toggle **Render background wallpaper**. The quality presets are Speed (30), Automatic (45, the default), and Quality (70); LunaViewer sends these choices to the Windows peer, which determines the resulting image and bandwidth. Wallpaper and quality preferences are saved for future launches.
 
-The Settings tab reports decoded frames per second, compressed screen payload in KiB/s, average local decode time, and remote canvas dimensions. These measurements help distinguish host/network limits from local decoding cost; payload rate excludes transport overhead.
+The **Control** tab shows live decoded FPS and compressed screen data rate in KiB/s beside the connection status. The **Settings** tab also reports average local decode time and remote canvas dimensions. These measurements help distinguish host/network limits from local decoding cost; payload rate excludes transport overhead.
 
 ## Logs
 

@@ -3,12 +3,14 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QFocusEvent>
+#include <QHBoxLayout>
 #include <QImage>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMouseEvent>
 #include <QPushButton>
+#include <QTabWidget>
 #include <QWheelEvent>
 #include <cstdlib>
 #include <iostream>
@@ -83,6 +85,22 @@ int main(int argc, char **argv) {
         auto *disconnect = window.findChild<QPushButton *>("disconnectButton");
         auto *quality = window.findChild<QComboBox *>("remoteQuality");
         auto *wallpaper = window.findChild<QCheckBox *>("renderWallpaper");
+        auto *fps = window.findChild<QLabel *>("liveFps");
+        auto *data_rate = window.findChild<QLabel *>("liveDataRate");
+        auto *status = window.findChild<QLabel *>("sessionStatus");
+        auto *tabs = window.findChild<QTabWidget *>("applicationTabs");
+        auto *status_row = window.findChild<QHBoxLayout *>("connectionStatusRow");
+        check(fps && data_rate && status && tabs && status_row &&
+                  status_row->indexOf(status) == 0 && status_row->indexOf(fps) == 1 &&
+                  status_row->indexOf(data_rate) == 2 && fps->parentWidget() == tabs->widget(0) &&
+                  data_rate->parentWidget() == tabs->widget(0),
+              "Control status, FPS and data rate must share one horizontal row");
+        check(fps->isVisible() && fps->geometry().center().y() == status->geometry().center().y() &&
+                  fps->geometry().top() > password->geometry().bottom() &&
+                  fps->text() == "0.0 FPS" && data_rate->isVisible() &&
+                  data_rate->geometry().left() > fps->geometry().right() &&
+                  data_rate->text() == "0.0 KiB/s",
+              "FPS row must be visible directly below connection inputs");
         check(canvas && toggle && target && password && connect && disconnect, "named UI controls");
         check(quality && wallpaper && quality->currentData().toInt() == 45 &&
                   wallpaper->isChecked(),
@@ -91,8 +109,8 @@ int main(int argc, char **argv) {
         wallpaper->setChecked(false);
         check(selected_quality == 70 && !selected_wallpaper, "visual setting callbacks");
         window.set_performance({12.0, 64.0, 3.5, 1920, 1080});
-        check(window.findChild<QLabel *>("screenPerformance")->text().contains("12.0 FPS"),
-              "performance metrics rendered");
+        check(fps->text() == "0.0 FPS" && data_rate->text() == "0.0 KiB/s",
+              "disconnected performance sample ignored");
         check(!toggle->isEnabled() && !toggle->isChecked(), "control starts gated");
         window.set_remote_permission(false);
         check(window.findChild<QLabel *>("remotePermission")->text().endsWith("unavailable"),
@@ -124,6 +142,28 @@ int main(int argc, char **argv) {
         key(canvas, QEvent::KeyPress, Qt::Key_A);
         check(events.empty(), "no input before connection/permission/local toggle");
         window.set_connected(true);
+        check(status->text() == "Connected" && fps->text() == "0.0 FPS",
+              "connection initializes status and FPS");
+        window.set_performance({12.0, 64.0, 3.5, 1920, 1080});
+        window.set_status("Connected; receiving screen");
+        check(fps->text() == "12.0 FPS" && data_rate->text() == "64.0 KiB/s" &&
+                  window.findChild<QLabel *>("screenPerformance")->text().contains("12.0 FPS"),
+              "periodic sample updates both labels and status preserves FPS");
+        tabs->setCurrentIndex(1);
+        application.processEvents();
+        const auto original_lifetime = lifetime;
+        auto hidden_frame = std::make_shared<Frame>(*lifetime.lock());
+        window.display_frame(hidden_frame);
+        lifetime = hidden_frame;
+        hidden_frame.reset();
+        window.set_performance({0.0, 0.0, 0.0, 1920, 1080, 0});
+        check(original_lifetime.expired() && !lifetime.expired() && fps->text() == "0.0 FPS",
+              "hidden Control tab receives frames and idle performance updates");
+        window.set_performance({7.0, 32.0, 2.0, 1920, 1080, 7});
+        tabs->setCurrentIndex(0);
+        application.processEvents();
+        check(fps->isVisible() && fps->text() == "7.0 FPS" && data_rate->text() == "32.0 KiB/s",
+              "returning to Control preserves the latest performance sample");
         window.set_remote_permission(true);
         key(canvas, QEvent::KeyPress, Qt::Key_A);
         check(events.empty(), "permission alone insufficient");
@@ -173,6 +213,12 @@ int main(int argc, char **argv) {
                   lifetime.expired(),
               "disconnect releases input and frame");
         check(!toggle->isChecked() && connect->isEnabled(), "disconnected UI reset");
+        window.set_performance({99.0, 64.0, 3.5, 1920, 1080, 99});
+        check(status->text() == "Disconnected" && fps->text() == "0.0 FPS" &&
+                  data_rate->text() == "0.0 KiB/s" &&
+                  window.findChild<QLabel *>("screenPerformance")->text() ==
+                      "No screen frames received yet",
+              "disconnect clears statistics and rejects late samples");
         window.set_remote_permission(false);
         check(window.findChild<QLabel *>("remotePermission")->text().endsWith("unavailable"),
               "disconnected permission mislabeled denied");
